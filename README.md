@@ -3,3 +3,5 @@
 - hw2: Model Inference of the Pretrained LeNet
 - hw3: LeNet Accelerator Engine - Design
 - hw4: LeNet Accelerator Engine - APR
+- midterm: System-level DNN Accelerator
+- final: System-level 24-points FFT Accelerator
