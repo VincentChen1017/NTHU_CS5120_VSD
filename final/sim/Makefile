@@ -9,9 +9,9 @@ cad_dir = spyglass-* nWaveLog* BSSLib.lib*
 all :: sim
 
 sim:
-	ncverilog -f ${SIM_SRC}
+	vcs -f ${SIM_SRC} -full64 +v2k -R -debug_pp -LDFLAGS -rdynamic -P ${VERDI_HOME}/share/PLI/VCS/LINUX64/novas.tab ${VERDI_HOME}/share/PLI/VCS/LINUX64/pli.a
 syn:
-	ncverilog -f ${SYN_SRC}
+	vcs -f ${SYN_SRC} -full64 +v2k -R -debug_pp -LDFLAGS -rdynamic -P ${VERDI_HOME}/share/PLI/VCS/LINUX64/novas.tab ${VERDI_HOME}/share/PLI/VCS/LINUX64/pli.a
 
 clean:
 	-rm -f ${BAK} ${LOG}
