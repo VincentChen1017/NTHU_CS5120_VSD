@@ -1,0 +1,262 @@
+/* Copyright (c) 2011-2021 Columbia University, System Level Design Group */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+#include <stdio.h>
+#ifndef __riscv
+#include <stdlib.h>
+#endif
+
+#include <esp_accelerator.h>
+#include <esp_probe.h>
+#include <fixed_point.h>
+#include "pattern/real.h"
+#include "pattern/imag.h"
+#include "pattern/real_golden.h"
+#include "pattern/imag_golden.h"
+
+typedef int32_t token_t;
+
+#define SLD_FFT 0x087
+#define DEV_NAME "sld,fft_rtl"
+
+/* <<--params-->> */
+const int32_t size = 1;
+
+static unsigned mem_size;
+token_t *mem;
+
+/* Size of the contiguous chunks for scatter/gather */
+#define CHUNK_SHIFT 20
+#define CHUNK_SIZE BIT(CHUNK_SHIFT)
+#define NCHUNK(_sz) ((_sz % CHUNK_SIZE == 0) ? (_sz / CHUNK_SIZE) : (_sz / CHUNK_SIZE) + 1)
+
+/* User defined registers */
+/* <<--regs-->> */
+#define FFT_SIZE_REG 0x40
+
+static int validate_buf()
+{
+	int total_errors = 0;
+	int errors = 0;
+
+	// input real
+	for (int i = 0; i < 240; i++)
+	{
+		if (mem[i] != real_golden[i])
+		{
+			printf("[ERROR]: index %d, result:%8x, gold:%8x\n", i, mem[i], real_golden[i]);
+			errors++;
+		}
+	}
+	if (errors == 0)
+		printf("===> input real pass!\n");
+	else
+		printf("===> input real fail!\n");
+
+	// input imag
+	errors = 0;
+	for (int i = 0; i < 240; i++)
+	{
+		if (mem[240 + i] != imag_golden[i])
+		{
+			printf("[ERROR]: index %d, result:%8x, gold:%8x\n", 240 + i, mem[240 + i], imag_golden[i]);
+			errors++;
+		}
+	}
+	if (errors == 0)
+		printf("===> input imag pass!\n");
+	else
+		printf("===> input imag fail!\n");
+
+	// output real
+	errors = 0;
+	for (int i = 0; i < 240; i++)
+	{
+		if (mem[480 + i] != real_golden[240 + i])
+		{
+			printf("[ERROR]: index %d, result:%8x, gold:%8x\n", 480 + i, mem[480 + i], real_golden[240 + i]);
+			errors++;
+		}
+	}
+	if (errors == 0)
+		printf("===> output real pass!\n");
+	else
+		printf("===> output real fail!\n");
+
+	// output imag
+	errors = 0;
+	for (int i = 0; i < 240; i++)
+	{
+		if (mem[720 + i] != imag_golden[240 + i])
+		{
+			printf("[ERROR]: index %d, result:%8x, gold:%8x\n", 720 + i, mem[720 + i], imag_golden[240 + i]);
+			errors++;
+		}
+	}
+	if (errors == 0)
+		printf("===> output imag pass!\n");
+	else
+		printf("===> output imag fail!\n");
+
+	return total_errors;
+}
+
+static void init_buf()
+{
+	int i;
+	int j;
+
+	// real
+	for (i = 0; i < 240; i++)
+	{
+		mem[i] = real[i];
+	}
+	// Imag
+	for (j = 0; j < 240; j++)
+	{
+		mem[240 + j] = imag[j];
+	}
+}
+
+static inline uint64_t get_counter()
+{
+	uint64_t counter;
+	asm volatile (
+		"li t0, 0;"
+		"csrr t0, mcycle;"
+		"mv %0, t0"
+		: "=r" ( counter )
+		:
+		: "t0"
+	);
+	return counter;
+}
+
+int main(int argc, char *argv[])
+{
+	int i;
+	int n;
+	int ndev;
+	struct esp_device *espdevs;
+	struct esp_device *dev;
+	unsigned done;
+	unsigned **ptable;
+	unsigned errors = 0;
+	unsigned coherence;
+
+	// Total need 960 32-bits/address.
+	// Define DRAM size, please refer to spec to know the lease size.
+	mem_size = 1000 * sizeof(token_t);
+
+	// Search for the device
+	printf("Scanning device tree... \n");
+
+	ndev = probe(&espdevs, VENDOR_SLD, SLD_FFT, DEV_NAME);
+	if (ndev == 0)
+	{
+		printf("fft not found\n");
+		return 0;
+	}
+
+	for (n = 0; n < ndev; n++)
+	{
+
+		printf("**************** %s.%d ****************\n", DEV_NAME, n);
+
+		dev = &espdevs[n];
+
+		// Check DMA capabilities
+		if (ioread32(dev, PT_NCHUNK_MAX_REG) == 0)
+		{
+			printf("  -> scatter-gather DMA is disabled. Abort.\n");
+			return 0;
+		}
+
+		if (ioread32(dev, PT_NCHUNK_MAX_REG) < NCHUNK(mem_size))
+		{
+			printf("  -> Not enough TLB entries available. Abort.\n");
+			return 0;
+		}
+
+		// Allocate memory
+		mem = aligned_malloc(mem_size);
+		printf("  memory buffer base-address = %p\n", mem);
+
+		// Alocate and populate page table
+		ptable = aligned_malloc(NCHUNK(mem_size) * sizeof(unsigned *));
+		for (i = 0; i < NCHUNK(mem_size); i++)
+			ptable[i] = (unsigned *)&mem[i * (CHUNK_SIZE / sizeof(token_t))];
+
+		printf("  ptable = %p\n", ptable);
+		printf("  nchunk = %lu\n", NCHUNK(mem_size));
+
+#ifndef __riscv
+		for (coherence = ACC_COH_NONE; coherence <= ACC_COH_RECALL; coherence++)
+		{
+#else
+		{
+			/* TODO: Restore full test once ESP caches are integrated */
+			coherence = ACC_COH_NONE;
+#endif
+			printf("  --------------------\n");
+			printf("  Generate input...\n");
+			init_buf();
+
+			// Pass common configuration parameters
+
+			iowrite32(dev, SELECT_REG, ioread32(dev, DEVID_REG));
+			iowrite32(dev, COHERENCE_REG, coherence);
+
+#ifndef __sparc
+			iowrite32(dev, PT_ADDRESS_REG, (unsigned long long)ptable);
+#else
+			iowrite32(dev, PT_ADDRESS_REG, (unsigned)ptable);
+#endif
+			iowrite32(dev, PT_NCHUNK_REG, NCHUNK(mem_size));
+			iowrite32(dev, PT_SHIFT_REG, CHUNK_SHIFT);
+
+			// Use the following if input and output data are not allocated at the default offsets
+			iowrite32(dev, SRC_OFFSET_REG, 0x0);
+			iowrite32(dev, DST_OFFSET_REG, 0x0);
+
+			// MODIFY: HERE GENERATED BY ESP, we don't have parameters
+			// Pass accelerator-specific configuration parameters
+			/* <<--regs-config-->> */
+			iowrite32(dev, FFT_SIZE_REG, size);
+
+			// Flush (customize coherence model here)
+			esp_flush(coherence);
+
+			// Start accelerators
+			printf("  Start...\n");
+			uint64_t start_time = get_counter();
+			iowrite32(dev, CMD_REG, CMD_MASK_START);
+
+			// Wait for completion
+			done = 0;
+			while (!done)
+			{
+				done = ioread32(dev, STATUS_REG);
+				done &= STATUS_MASK_DONE;
+			}
+			iowrite32(dev, CMD_REG, 0x0);
+			uint64_t finish_time = get_counter();
+			uint64_t compute_time = finish_time - start_time;
+			printf("	Done\n");
+			printf("	Compute takes %d cycles\n", compute_time);
+			printf("	Validating...\n");
+
+			/* Validation */
+			errors = validate_buf();
+			if (errors)
+				printf("[FAIL] There are some errors QQ\n");
+			else
+				printf("[PASS] Congratulation! All results are correct\n");
+		}
+		aligned_free(ptable);
+		aligned_free(mem);
+
+	}
+
+	return 0;
+}
