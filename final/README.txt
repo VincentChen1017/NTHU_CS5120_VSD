@@ -8,3 +8,5 @@ Enter unique accelerator id as three hex digits[04A]: 087
 
 Use pattern:
 將pattern資料夾放置在/esp/accelerators/rtl/fft_rtl/sw/baremetal中即可。
+
+2022/09/28 update: hdl file內的rtl code似乎有誤（貌似沒有做round處理），如果要看fft code要去esp內的"fft_rtl_basic_dma64.v"中看。
